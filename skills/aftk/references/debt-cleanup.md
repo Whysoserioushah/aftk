@@ -39,23 +39,51 @@ imports, and pass them as `-D name=value`. A baseline that fails is a harness bu
 skip. Compare warnings with the baseline by message: a new "unused `simp` argument" after a
 removal often means a later step absorbed it.
 
+**Build coverage.** After applying the edit, build the edited modules and every direct and
+transitive importer in the workspace, including sibling libraries and executables. Alternatively,
+build every relevant library and executable target explicitly; `lake build` alone covers only the
+configured default targets. Declaration-level `rdeps` helps prioritize inspection but cannot
+select a complete rebuild: it misses `example`s and other source elaboration uses. Statement
+hashes cannot fill that gap, since attributes can change without changing a constant's type or
+value. For example, these two files compile:
+
+```lean
+-- A.lean
+@[implicit_reducible] def Hidden := Nat
+```
+
+```lean
+-- B.lean
+import A
+example (n : Nat) : Hidden := by
+  with_implicit exact n
+```
+
+Removing the attribute leaves `A` compiling with identical type/value hashes for `Hidden` and
+no declaration-level dependents, but `B` fails. Include `B` through its module import edge.
+
 **The absorber test.** `change`, `show … from`, `erw` and a transparency flag are visible
 unfolding steps. Delete one and the proof may still compile, because a later `exact`, `rfl`,
 `apply`, `refine`, `simpa` or term after `:=` now unfolds the same definitions at default
-transparency. The debt moved; it was not paid. `with_implicit tacs` runs `tacs` at `.implicit`
-transparency, which unfolds only `@[reducible]`, `@[instance_reducible]` and
-`@[implicit_reducible]` definitions. Call the original text O and the edited one D. In both,
-wrap each later tactic that unifies against the goal in `with_implicit`:
+transparency. The debt moved; it was not paid. `with_implicit tacs` sets the ambient transparency
+to `.implicit`, which unfolds only `@[reducible]`, `@[instance_reducible]` and
+`@[implicit_reducible]` definitions. Tactics and nested term elaborators can override that
+setting, so the outer wrapper alone does not establish tier 3. Call the original text O and the
+edited one D. In both, wrap each later tactic that unifies against the goal in `with_implicit`:
 
 - D fails where O passes: the edit moved unfolding into that tactic. Keep the debt.
 - Both fail: accept only if the goals at that tactic are identical in O and D (goal identity,
   below).
+- Both pass: check that the inner operations also respect the intended transparency. Use an
+  operation-specific check in both texts, with a control that fails when unfolding a plain
+  definition is required. If an inner operation cannot be checked, the result is inconclusive
+  at tier 3; retain the item.
 
 For a deleted `change T` or `show T` there is a direct test too: re-insert it in D as
 `with_implicit change T`. If that elaborates, the step did only implicit-level work. This is
 sufficient, not necessary.
 
-Two traps:
+Traps:
 
 - *A flag blinds the test.* Under `set_option backward.isDefEq.respectTransparency false`,
   implicit arguments unify at default transparency whatever `with_implicit` says. Inside a
@@ -66,6 +94,26 @@ Two traps:
 - *`erw` sets `.default` in its own configuration*, so `with_implicit erw …` restricts nothing.
   Test the demoted `rw` in context. Conversely, `with_implicit rw` can match where plain `rw`
   fails, so compile the unwrapped text as well.
+- *Term elaboration can pass through the outer wrapper.* Both of these proofs compile on
+  Lean v4.33 with the flag forced on:
+
+  ```lean
+  def hiddenNat : Nat := 0
+
+  set_option backward.isDefEq.respectTransparency true in
+  example : hiddenNat = 0 := by
+    change 0 = 0
+    with_implicit exact (show _ from rfl)
+
+  set_option backward.isDefEq.respectTransparency true in
+  example : hiddenNat = 0 := by
+    with_implicit exact (show _ from rfl)
+  ```
+
+  The retained term absorbs the deleted `change`. Replacing the final tactic with
+  `with_implicit rfl` passes in O and fails in D, exposing the unfolding. Use this tactic-level
+  check for term `rfl`; passing `with_implicit exact …` alone is insufficient. These are test
+  variants, not repairs to the proposed edit.
 
 **No repairs.** An edit that needs a new `exact`, a `have h : a = b := rfl` restating an equation
 for a later `rw`, or a type ascription has moved the debt. A tool or agent that proposes removals

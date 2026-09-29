@@ -128,8 +128,9 @@ printf '%s\n' MyLib.Foo.bar "MyLib.Foo.baz'" | lake exe aftk rdeps library MyLib
   `library MyLib` covers MyLib's own modules; query a sibling library that imports MyLib too, and
   remember that consumers outside the workspace are invisible to every scope. The graph misses
   `example`s, `#check`/`#eval`, attribute commands naming `X` (`attribute [simp] X`,
-  `@[deprecated X]`), `open … (X)`, and `simp [X]` arguments that `simp` did not use. A leaf is
-  safe to *clean*; to delete one, delete it in a scratch tree and build everything that could see it.
+  `@[deprecated X]`), `open … (X)`, and `simp [X]` arguments that `simp` did not use. A leaf is a
+  candidate for cleanup, not evidence that an edit is safe. For cleanup or deletion, build the
+  edited modules and all their direct and transitive importers in the workspace (Workflow 5).
 - **Name resolution.** Give the fully qualified name. `--resolve-suffix` matches a whole-name-
   component suffix and accepts a unique match (ambiguity fails with sorted candidates); a failed
   exact lookup also lists up to 20 candidates. `--defined-in <module>` disambiguates private
@@ -201,7 +202,7 @@ lake exe aftk diagnostics MyLib/Foo.lean > base.json          # baseline: must h
 lake exe aftk tech-debt --all-markers --jsonl module MyLib.Foo > before.jsonl  # same scope, before the edit
 lake exe aftk probe MyLib.Foo --line 42 --text ''             # drop the `set_option … in` on line 42
 printf '  rw [h]' | lake exe aftk probe MyLib.Foo --line 57 --stdin   # `erw [h]` → `rw [h]`
-lake exe aftk rdeps library MyLib MyLib.Foo.bar --jsonl       # declarations (with modules) the edit can affect
+lake exe aftk rdeps library MyLib MyLib.Foo.bar --jsonl       # known term dependents to prioritize
 lake exe aftk tech-debt --all-markers --jsonl module MyLib.Foo > after.jsonl   # after the edit
 ```
 
@@ -209,16 +210,24 @@ lake exe aftk tech-debt --all-markers --jsonl module MyLib.Foo > after.jsonl   #
 2. **Compiles like the build, same warnings, same statements.** The probe runs under the
    module's `[leanOptions]`; a hand-run `lake env lean` does not (`lake lean` does, or pass them
    as `-D` flags). No warning may appear whose message is missing from `base.json`. Then apply
-   the edit, build the modules `rdeps` lists, and compare a hash of every constant's type and
-   proof-erased value before and after. aftk has no hash command, so this check is yours
-   ([references/debt-cleanup.md](references/debt-cleanup.md) §1–§2).
+   the edit and build the edited modules plus all direct and transitive importers in the
+   workspace, including sibling libraries and executable targets. Building every relevant
+   library and executable target also covers this closure; default `lake build` targets may not.
+   Use `rdeps` to prioritize checks, not to delimit this build: it misses source uses such as
+   `example`s. Compare a hash of every constant's type and proof-erased value before and after;
+   hashes do not cover attributes or all elaboration dependencies. aftk has no hash command,
+   so this check is yours ([references/debt-cleanup.md](references/debt-cleanup.md) §1–§2).
 3. **Nothing absorbs it.** A later `exact`, `rfl` or `simpa`, or the declaration's own
    `backward.isDefEq.respectTransparency false`, can now do the unfolding the deleted step did.
    In both texts, run each later tactic that unifies against the goal under `with_implicit`; in a
    flagged declaration use `set_option backward.isDefEq.respectTransparency true in
-   with_implicit <tac>`. The edited text must not fail where the original passes (`with_implicit
-   erw` tests nothing: `erw` sets its own transparency). Accept no repairs: an edit that needs a
-   new `exact`, a `have … := rfl` or a type ascription moved the debt instead of paying it (§1).
+   with_implicit <tac>`. The edited text must not fail where the original passes. Passing the
+   outer wrapper is only a screen: tactics and nested term elaborators can use their own
+   transparency (`erw`, or `exact (show _ from rfl)`, for example). Check the inner operation in
+   both texts with a control that fails when unfolding is required; for term `rfl`, test tactic
+   `with_implicit rfl` at the same goal. If the inner operation cannot be checked, report the
+   result as inconclusive at tier 3 and retain the item. Accept no repairs: an edit that needs
+   a new `exact`, a `have … := rfl` or a type ascription moved the debt (§1).
 
 - **Controls.** Show every harness one input that must fail and one that must pass before
   trusting it (reference §3).
